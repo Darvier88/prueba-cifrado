@@ -93,7 +93,11 @@
 </div>
 
 <!-- libsodium SUMO: incluye crypto_pwhash (Argon2id). La versión estándar NO lo trae. -->
-<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.15/dist/browsers-sumo/sodium.js"></script>
+<script>
+  // Callback que libsodium invoca cuando termina de cargar.
+  window.sodium = { onload: function (s) { window.__sodium = s; } };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.13/dist/browsers-sumo/sodium.js"></script>
 <script>
 const CHUNK = 64 * 1024;                 // 64 KiB de texto plano por bloque
 const $ = id => document.getElementById(id);
@@ -103,14 +107,34 @@ function fmtMs(ms){ return ms<1000 ? ms.toFixed(0)+' ms' : (ms/1000).toFixed(2)+
 function peakMem(){ return (performance&&performance.memory) ? performance.memory.usedJSHeapSize : null; }
 
 let sodium=null, ready=false;
+
+// Espera a que libsodium esté listo, sin importar cómo exponga el global.
+function waitForSodium(timeoutMs){
+  return new Promise((resolve, reject)=>{
+    const t0 = Date.now();
+    (function check(){
+      const s = window.__sodium ||
+                (window.sodium && window.sodium.crypto_secretstream_xchacha20poly1305_push ? window.sodium : null);
+      if (s && s.crypto_pwhash) return resolve(s);
+      if (Date.now()-t0 > timeoutMs) return reject(new Error('timeout esperando libsodium'));
+      setTimeout(check, 50);
+    })();
+  });
+}
+
 window.addEventListener('load', async ()=>{
   $('m-plat').textContent = navigator.userAgent.slice(0,60)+'…';
   $('m-sw').textContent = ('serviceWorker' in navigator) ? 'API disponible' : 'no disponible';
   try{
-    await window.sodium.ready; sodium = window.sodium; ready=true;
+    sodium = await waitForSodium(15000);
+    ready = true;
     log('libsodium (sumo) listo. Versión:', sodium.sodium_version_string ? sodium.sodium_version_string() : '?');
-    $('run').disabled = false;
-  }catch(e){ log('ERROR cargando libsodium:', e.message); $('status').textContent='No cargó libsodium (¿sin internet o CSP?).'; }
+    $('status').textContent = 'Listo. Elige un archivo y dale al botón.';
+    if ($('file').files[0]) $('run').disabled = false;
+  }catch(e){
+    log('ERROR cargando libsodium:', e.message);
+    $('status').textContent='No cargó libsodium (¿sin internet, adblocker o CSP bloqueando el CDN?).';
+  }
 });
 $('file').addEventListener('change', ()=>{ if(ready) $('run').disabled = !$('file').files[0]; });
 
