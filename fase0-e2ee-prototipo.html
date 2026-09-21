@@ -61,6 +61,13 @@
       </div>
     </div>
     <div class="row" style="margin-top:16px">
+      <div class="field" style="flex:0 1 auto;min-width:0">
+        <label class="lbl" for="mode">Lectura del archivo</label>
+        <select id="mode" style="padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;font:inherit">
+          <option value="stream">file.stream() (secuencial)</option>
+          <option value="slice">file.slice() por bloque (original)</option>
+        </select>
+      </div>
       <button id="run" disabled>Cifrar → descifrar → reproducir</button>
       <span id="status" class="note"></span>
     </div>
@@ -101,7 +108,13 @@
   window.addEventListener('unhandledrejection', function (e) {
     diag('✗ Promesa rechazada: ' + ((e.reason && e.reason.message) || e.reason));
   });
-  diag('Contexto: ' + location.protocol + ' · WebAssembly: ' + (typeof WebAssembly === 'object' ? 'sí' : 'NO'));
+  diag('Contexto: ' + location.protocol + ' · WebAssembly: ' + (typeof WebAssembly === 'object' ? 'sí' : 'NO') +
+       ' · RAM aprox: ' + (navigator.deviceMemory ? navigator.deviceMemory + ' GB' : 'n/d'));
+  diag('UA: ' + navigator.userAgent);
+  // Si la pestaña se oculta (pantalla apagada, cambio de app), el navegador la congela y los tiempos se inflan.
+  document.addEventListener('visibilitychange', function () {
+    diag('⚠ Pestaña ' + (document.hidden ? 'OCULTA' : 'visible de nuevo') + ' (t=' + (performance.now() / 1000).toFixed(1) + ' s)');
+  });
 </script>
 <!-- libsodium SUMO (incluye crypto_pwhash / Argon2id). El paquete npm NO trae dist/browsers-sumo/,
      así que se cargan dos scripts: el núcleo (define window.libsodium) y el wrapper (define window.sodium).
@@ -119,6 +132,39 @@ function log(...a){ const l=$('log'); l.textContent += a.join(' ') + '\n'; l.scr
 function fmtBytes(n){ if(n<1024)return n+' B'; if(n<1048576)return (n/1024).toFixed(1)+' KB'; if(n<1073741824)return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
 function fmtMs(ms){ return ms<1000 ? ms.toFixed(0)+' ms' : (ms/1000).toFixed(2)+' s'; }
 function peakMem(){ return (performance&&performance.memory) ? performance.memory.usedJSHeapSize : null; }
+
+// Lectura A: un file.slice().arrayBuffer() por bloque (lo que hacía el prototipo original).
+async function* chunksFromSlices(file, st){
+  for(let off=0; off<file.size; off+=CHUNK){
+    const t0 = performance.now();
+    const buf = new Uint8Array(await file.slice(off, Math.min(off+CHUNK, file.size)).arrayBuffer());
+    st.read += performance.now()-t0; st.reads++;
+    yield buf;
+  }
+}
+// Lectura B: un solo flujo secuencial, re-empaquetado en bloques exactos de 64 KiB.
+async function* chunksFromStream(file, st){
+  const reader = file.stream().getReader();
+  let buf = new Uint8Array(CHUNK), fill = 0;
+  for(;;){
+    const t0 = performance.now();
+    const { done, value } = await reader.read();
+    st.read += performance.now()-t0; st.reads++;
+    if(done) break;
+    for(let p=0; p<value.length;){
+      const n = Math.min(CHUNK-fill, value.length-p);
+      buf.set(value.subarray(p, p+n), fill); fill += n; p += n;
+      if(fill === CHUNK){ yield buf; buf = new Uint8Array(CHUNK); fill = 0; }
+    }
+  }
+  if(fill > 0) yield buf.subarray(0, fill);
+}
+
+// Evita que la pantalla del móvil se apague a mitad de la prueba (si el navegador lo soporta).
+async function keepAwake(){
+  try{ const l = await navigator.wakeLock.request('screen'); log('Wake lock activo (la pantalla no se apagará).'); return l; }
+  catch(e){ log('Sin wake lock (' + (e.message||'no soportado') + '): no bloquees la pantalla durante la prueba.'); return null; }
+}
 
 let sodium=null, ready=false;
 
@@ -176,6 +222,7 @@ async function run(){
   $('run').disabled=true; $('status').textContent='Procesando…'; $('bar').style.width='0%';
   $('media').innerHTML='<span class="note">Descifrando…</span>';
   let memMax = peakMem() || 0;
+  const lock = await keepAwake();
   const track = ()=>{ const m=peakMem(); if(m&&m>memMax)memMax=m; };
 
   try{
@@ -188,20 +235,24 @@ async function run(){
     $('m-kdf').textContent = fmtMs(dt);
     log('  Argon2id:', fmtMs(dt));
 
-    // 2) Cifrar por bloques (secretstream), leyendo el archivo en trozos
+    // 2) Cifrar por bloques (secretstream), separando tiempo de lectura vs cripto
+    const mode = $('mode').value;
+    const st = { read: 0, reads: 0, crypto: 0 };
+    log('Lectura:', mode === 'stream' ? 'file.stream()' : 'file.slice() por bloque');
     const encT0 = performance.now();
     const { state, header } = sodium.crypto_secretstream_xchacha20poly1305_init_push(key);
     const TAG_MSG = sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE;
     const TAG_FIN = sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL;
     const cipherChunks = [];
     let off = 0;
-    while(off < file.size){
-      const end = Math.min(off+CHUNK, file.size);
-      const buf = new Uint8Array(await file.slice(off, end).arrayBuffer());
-      const isLast = end >= file.size;
+    const source = mode === 'stream' ? chunksFromStream(file, st) : chunksFromSlices(file, st);
+    for await (const buf of source){
+      const isLast = off + buf.length >= file.size;
+      const t0 = performance.now();
       const c = sodium.crypto_secretstream_xchacha20poly1305_push(state, buf, null, isLast?TAG_FIN:TAG_MSG);
+      st.crypto += performance.now()-t0;
       cipherChunks.push(c);
-      off = end; track();
+      off += buf.length; track();
       $('bar').style.width = ((off/file.size)*50).toFixed(0)+'%';
       if((cipherChunks.length & 63)===0) await new Promise(r=>setTimeout(r)); // ceder al hilo
     }
@@ -209,6 +260,8 @@ async function run(){
     const encMs = performance.now()-encT0;
     $('m-enc').textContent = fmtMs(encMs);
     log('  Cifrado:', fmtMs(encMs), '· bloques:', cipherChunks.length, '· ciphertext:', fmtBytes(cipherBlob.size));
+    log('    lectura:', fmtMs(st.read), '('+st.reads+' lecturas) · cripto:', fmtMs(st.crypto),
+        '· otros:', fmtMs(encMs - st.read - st.crypto));
     cipherChunks.length = 0; track();
 
     // 3) Descifrar por bloques y reconstruir el Blob de texto plano
@@ -216,10 +269,14 @@ async function run(){
     const CIPHER_CHUNK = CHUNK + sodium.crypto_secretstream_xchacha20poly1305_ABYTES;
     const pull = sodium.crypto_secretstream_xchacha20poly1305_init_pull(header, key);
     const plainChunks = []; let coff=0, okFinal=false;
+    const ds = { read: 0, crypto: 0 };
     while(coff < cipherBlob.size){
       const end = Math.min(coff+CIPHER_CHUNK, cipherBlob.size);
+      let t0 = performance.now();
       const cbuf = new Uint8Array(await cipherBlob.slice(coff, end).arrayBuffer());
+      ds.read += performance.now()-t0; t0 = performance.now();
       const res = sodium.crypto_secretstream_xchacha20poly1305_pull(pull, cbuf);
+      ds.crypto += performance.now()-t0;
       if(!res){ throw new Error('Fallo al descifrar/verificar un bloque (posible manipulación o truncamiento).'); }
       plainChunks.push(res.message);
       if(res.tag === TAG_FIN) okFinal = true;
@@ -231,6 +288,7 @@ async function run(){
     const decMs = performance.now()-decT0;
     $('m-dec').textContent = fmtMs(decMs);
     log('  Descifrado:', fmtMs(decMs), '· tag FINAL visto:', okFinal, '· salida:', fmtBytes(plainBlob.size));
+    log('    lectura:', fmtMs(ds.read), '· cripto:', fmtMs(ds.crypto), '· otros:', fmtMs(decMs - ds.read - ds.crypto));
 
     // 4) Verificar integridad de tamaño + marca final
     const integ = okFinal && plainBlob.size === file.size;
@@ -255,6 +313,7 @@ async function run(){
     $('m-ok').innerHTML = '<span class="pill err">Crash/err</span>';
     log('ERROR:', e.message, '\n(Si el navegador se quedó sin memoria, este es el límite de esta plataforma.)');
   }finally{
+    if(lock) lock.release().catch(()=>{});
     $('run').disabled=false;
   }
 }
