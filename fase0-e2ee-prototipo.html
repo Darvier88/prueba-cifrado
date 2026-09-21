@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Fase 0 · Prototipo E2EE (secretstream) · Backup Reader</title>
+<style>
+  :root{
+    --paper:#FBF8F1; --paper2:#F5F0E6; --ink:#16233B; --ink2:#2E4A6B;
+    --slate:#5A6673; --teal:#2F7E6C; --teal2:#245F52; --border:#D3D8DE;
+    --ok:#17784f; --warn:#B8842B; --err:#9A5B3F; --card:#fff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+       padding:24px clamp(12px,4vw,32px);line-height:1.5}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:clamp(22px,3.4vw,30px);letter-spacing:-.02em;margin:0 0 4px}
+  .sub{color:var(--slate);font-size:14px;margin:0 0 22px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;
+        padding:20px;margin-bottom:18px;box-shadow:0 1px 2px rgba(22,35,59,.05)}
+  label.lbl{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--slate);display:block;margin-bottom:6px}
+  input[type=text]{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;font:inherit}
+  input[type=file]{font:inherit}
+  .row{display:flex;gap:14px;flex-wrap:wrap;align-items:end}
+  .field{flex:1;min-width:220px}
+  button{background:var(--teal);color:#fff;border:none;border-radius:8px;padding:12px 20px;
+         font:inherit;font-weight:600;cursor:pointer}
+  button:hover{background:var(--teal2)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:6px}
+  .metric{background:var(--paper2);border-radius:8px;padding:12px 14px}
+  .metric .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--slate)}
+  .metric .v{font-size:20px;font-weight:600;margin-top:3px}
+  .log{font-family:var(--mono);font-size:12px;white-space:pre-wrap;background:var(--ink);color:#DCEEE9;
+       border-radius:8px;padding:14px;max-height:260px;overflow:auto}
+  .media{margin-top:12px}
+  .media img,.media video{max-width:100%;border-radius:8px;border:1px solid var(--border)}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:3px 10px;border-radius:100px}
+  .pill.ok{background:#DCEEE9;color:var(--teal2)} .pill.err{background:#F0DED4;color:var(--err)}
+  .note{font-size:13px;color:var(--slate)}
+  .progress{height:8px;background:var(--paper2);border-radius:100px;overflow:hidden;margin-top:10px}
+  .progress > i{display:block;height:100%;width:0;background:var(--teal);transition:width .1s}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Fase 0 · Prototipo E2EE en navegador</h1>
+  <p class="sub">Cifra un archivo con Argon2id + XChaCha20-Poly1305 (secretstream, bloques de 64 KiB), lo descifra y lo reproduce. Mide tiempos y memoria. Ábrelo en Chrome (escritorio y Android) y, cuando puedas, en Safari de iPhone.</p>
+
+  <div class="card">
+    <div class="row">
+      <div class="field">
+        <label class="lbl" for="pass">Contraseña (para derivar la clave)</label>
+        <input type="text" id="pass" value="prueba-de-contrasena-123" />
+      </div>
+      <div class="field">
+        <label class="lbl" for="file">Archivo (imagen, audio, video… mientras más grande, mejor)</label>
+        <input type="file" id="file" />
+      </div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button id="run" disabled>Cifrar → descifrar → reproducir</button>
+      <span id="status" class="note"></span>
+    </div>
+    <div class="progress"><i id="bar"></i></div>
+  </div>
+
+  <div class="card">
+    <label class="lbl">Métricas</label>
+    <div class="metrics">
+      <div class="metric"><div class="k">Plataforma</div><div class="v" id="m-plat" style="font-size:14px">—</div></div>
+      <div class="metric"><div class="k">Tamaño archivo</div><div class="v" id="m-size">—</div></div>
+      <div class="metric"><div class="k">Argon2id</div><div class="v" id="m-kdf">—</div></div>
+      <div class="metric"><div class="k">Cifrado</div><div class="v" id="m-enc">—</div></div>
+      <div class="metric"><div class="k">Descifrado</div><div class="v" id="m-dec">—</div></div>
+      <div class="metric"><div class="k">Memoria JS (pico)</div><div class="v" id="m-mem">—</div></div>
+      <div class="metric"><div class="k">Íntegro</div><div class="v" id="m-ok">—</div></div>
+      <div class="metric"><div class="k">Service Worker</div><div class="v" id="m-sw" style="font-size:14px">—</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <label class="lbl">Resultado (media descifrada)</label>
+    <div class="media" id="media"><span class="note">Aparecerá aquí tras descifrar.</span></div>
+  </div>
+
+  <div class="card">
+    <label class="lbl">Registro</label>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<!-- libsodium SUMO: incluye crypto_pwhash (Argon2id). La versión estándar NO lo trae. -->
+<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.15/dist/browsers-sumo/sodium.js"></script>
+<script>
+const CHUNK = 64 * 1024;                 // 64 KiB de texto plano por bloque
+const $ = id => document.getElementById(id);
+function log(...a){ const l=$('log'); l.textContent += a.join(' ') + '\n'; l.scrollTop=l.scrollHeight; }
+function fmtBytes(n){ if(n<1024)return n+' B'; if(n<1048576)return (n/1024).toFixed(1)+' KB'; if(n<1073741824)return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
+function fmtMs(ms){ return ms<1000 ? ms.toFixed(0)+' ms' : (ms/1000).toFixed(2)+' s'; }
+function peakMem(){ return (performance&&performance.memory) ? performance.memory.usedJSHeapSize : null; }
+
+let sodium=null, ready=false;
+window.addEventListener('load', async ()=>{
+  $('m-plat').textContent = navigator.userAgent.slice(0,60)+'…';
+  $('m-sw').textContent = ('serviceWorker' in navigator) ? 'API disponible' : 'no disponible';
+  try{
+    await window.sodium.ready; sodium = window.sodium; ready=true;
+    log('libsodium (sumo) listo. Versión:', sodium.sodium_version_string ? sodium.sodium_version_string() : '?');
+    $('run').disabled = false;
+  }catch(e){ log('ERROR cargando libsodium:', e.message); $('status').textContent='No cargó libsodium (¿sin internet o CSP?).'; }
+});
+$('file').addEventListener('change', ()=>{ if(ready) $('run').disabled = !$('file').files[0]; });
+
+async function deriveKey(pass){
+  const salt = sodium.randombytes_buf(sodium.crypto_pwhash_SALTBYTES);
+  const t0 = performance.now();
+  const key = sodium.crypto_pwhash(
+    sodium.crypto_secretstream_xchacha20poly1305_KEYBYTES,
+    pass, salt,
+    3,                       // opsLimit (t=3)
+    64*1024*1024,            // memLimit (m=64 MiB)
+    sodium.crypto_pwhash_ALG_ARGON2ID13
+  );
+  const dt = performance.now()-t0;
+  return { key, dt };
+}
+
+async function run(){
+  const file = $('file').files[0]; if(!file) return;
+  $('run').disabled=true; $('status').textContent='Procesando…'; $('bar').style.width='0%';
+  $('media').innerHTML='<span class="note">Descifrando…</span>';
+  let memMax = peakMem() || 0;
+  const track = ()=>{ const m=peakMem(); if(m&&m>memMax)memMax=m; };
+
+  try{
+    $('m-size').textContent = fmtBytes(file.size);
+    log('\n=== Archivo:', file.name, '('+fmtBytes(file.size)+', tipo:', file.type||'desconocido', ') ===');
+
+    // 1) Derivar clave (Argon2id)
+    log('Derivando clave con Argon2id (m=64MiB, t=3)…');
+    const { key, dt } = await deriveKey($('pass').value || 'x');
+    $('m-kdf').textContent = fmtMs(dt);
+    log('  Argon2id:', fmtMs(dt));
+
+    // 2) Cifrar por bloques (secretstream), leyendo el archivo en trozos
+    const encT0 = performance.now();
+    const { state, header } = sodium.crypto_secretstream_xchacha20poly1305_init_push(key);
+    const TAG_MSG = sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE;
+    const TAG_FIN = sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL;
+    const cipherChunks = [];
+    let off = 0;
+    while(off < file.size){
+      const end = Math.min(off+CHUNK, file.size);
+      const buf = new Uint8Array(await file.slice(off, end).arrayBuffer());
+      const isLast = end >= file.size;
+      const c = sodium.crypto_secretstream_xchacha20poly1305_push(state, buf, null, isLast?TAG_FIN:TAG_MSG);
+      cipherChunks.push(c);
+      off = end; track();
+      $('bar').style.width = ((off/file.size)*50).toFixed(0)+'%';
+      if((cipherChunks.length & 63)===0) await new Promise(r=>setTimeout(r)); // ceder al hilo
+    }
+    const cipherBlob = new Blob(cipherChunks);   // el ciphertext guardado (como iría a Storage)
+    const encMs = performance.now()-encT0;
+    $('m-enc').textContent = fmtMs(encMs);
+    log('  Cifrado:', fmtMs(encMs), '· bloques:', cipherChunks.length, '· ciphertext:', fmtBytes(cipherBlob.size));
+    cipherChunks.length = 0; track();
+
+    // 3) Descifrar por bloques y reconstruir el Blob de texto plano
+    const decT0 = performance.now();
+    const CIPHER_CHUNK = CHUNK + sodium.crypto_secretstream_xchacha20poly1305_ABYTES;
+    const pull = sodium.crypto_secretstream_xchacha20poly1305_init_pull(header, key);
+    const plainChunks = []; let coff=0, okFinal=false;
+    while(coff < cipherBlob.size){
+      const end = Math.min(coff+CIPHER_CHUNK, cipherBlob.size);
+      const cbuf = new Uint8Array(await cipherBlob.slice(coff, end).arrayBuffer());
+      const res = sodium.crypto_secretstream_xchacha20poly1305_pull(pull, cbuf);
+      if(!res){ throw new Error('Fallo al descifrar/verificar un bloque (posible manipulación o truncamiento).'); }
+      plainChunks.push(res.message);
+      if(res.tag === TAG_FIN) okFinal = true;
+      coff = end; track();
+      $('bar').style.width = (50 + (coff/cipherBlob.size)*50).toFixed(0)+'%';
+      if((plainChunks.length & 63)===0) await new Promise(r=>setTimeout(r));
+    }
+    const plainBlob = new Blob(plainChunks, { type: file.type || 'application/octet-stream' });
+    const decMs = performance.now()-decT0;
+    $('m-dec').textContent = fmtMs(decMs);
+    log('  Descifrado:', fmtMs(decMs), '· tag FINAL visto:', okFinal, '· salida:', fmtBytes(plainBlob.size));
+
+    // 4) Verificar integridad de tamaño + marca final
+    const integ = okFinal && plainBlob.size === file.size;
+    $('m-ok').innerHTML = integ ? '<span class="pill ok">Sí</span>' : '<span class="pill err">No</span>';
+    $('m-mem').textContent = memMax ? fmtBytes(memMax) : 'n/d (solo Chrome)';
+
+    // 5) Reproducir/mostrar la media descifrada
+    const url = URL.createObjectURL(plainBlob);
+    const t = (file.type||'');
+    let el;
+    if(t.startsWith('image/')) el = `<img src="${url}" alt="descifrada" />`;
+    else if(t.startsWith('audio/')) el = `<audio controls src="${url}" style="width:100%"></audio>`;
+    else if(t.startsWith('video/')) el = `<video controls src="${url}" style="width:100%;max-height:420px"></video>`;
+    else el = `<a href="${url}" download="${file.name}" class="note">Descargar archivo descifrado (tipo no reproducible)</a>`;
+    $('media').innerHTML = el;
+
+    $('bar').style.width='100%';
+    $('status').textContent = integ ? '✓ OK: cifrado, descifrado e íntegro.' : '⚠ Terminó pero la verificación falló.';
+    log('=== FIN ===');
+  }catch(e){
+    $('status').textContent = '✗ Error: '+e.message;
+    $('m-ok').innerHTML = '<span class="pill err">Crash/err</span>';
+    log('ERROR:', e.message, '\n(Si el navegador se quedó sin memoria, este es el límite de esta plataforma.)');
+  }finally{
+    $('run').disabled=false;
+  }
+}
+$('run').addEventListener('click', run);
+</script>
+</body>
+</html>
