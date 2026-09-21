@@ -92,12 +92,26 @@
   </div>
 </div>
 
-<!-- libsodium SUMO: incluye crypto_pwhash (Argon2id). La versión estándar NO lo trae. -->
+<!-- Diagnóstico: escribe errores en el registro de la página (útil en móvil, sin DevTools). -->
 <script>
-  // Callback que libsodium invoca cuando termina de cargar.
-  window.sodium = { onload: function (s) { window.__sodium = s; } };
+  window.diag = function (m) { var l = document.getElementById('log'); l.textContent += m + '\n'; l.scrollTop = l.scrollHeight; };
+  window.addEventListener('error', function (e) {
+    if (e.message) diag('✗ Error JS: ' + e.message + ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    diag('✗ Promesa rechazada: ' + ((e.reason && e.reason.message) || e.reason));
+  });
+  diag('Contexto: ' + location.protocol + ' · WebAssembly: ' + (typeof WebAssembly === 'object' ? 'sí' : 'NO'));
 </script>
-<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.13/dist/browsers-sumo/sodium.js"></script>
+<!-- libsodium SUMO (incluye crypto_pwhash / Argon2id). El paquete npm NO trae dist/browsers-sumo/,
+     así que se cargan dos scripts: el núcleo (define window.libsodium) y el wrapper (define window.sodium).
+     Ambos deben tener la MISMA versión. -->
+<script src="https://cdn.jsdelivr.net/npm/libsodium-sumo@0.7.13/dist/modules-sumo/libsodium-sumo.js"
+        onload="diag('✓ Descargado libsodium-sumo.js (núcleo)')"
+        onerror="diag('✗ No se pudo descargar libsodium-sumo.js (404, sin red, adblocker o CSP)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.13/dist/modules-sumo/libsodium-wrappers.js"
+        onload="diag('✓ Descargado libsodium-wrappers.js (wrapper)')"
+        onerror="diag('✗ No se pudo descargar libsodium-wrappers.js (404, sin red, adblocker o CSP)')"></script>
 <script>
 const CHUNK = 64 * 1024;                 // 64 KiB de texto plano por bloque
 const $ = id => document.getElementById(id);
@@ -108,18 +122,23 @@ function peakMem(){ return (performance&&performance.memory) ? performance.memor
 
 let sodium=null, ready=false;
 
-// Espera a que libsodium esté listo, sin importar cómo exponga el global.
-function waitForSodium(timeoutMs){
-  return new Promise((resolve, reject)=>{
-    const t0 = Date.now();
-    (function check(){
-      const s = window.__sodium ||
-                (window.sodium && window.sodium.crypto_secretstream_xchacha20poly1305_push ? window.sodium : null);
-      if (s && s.crypto_pwhash) return resolve(s);
-      if (Date.now()-t0 > timeoutMs) return reject(new Error('timeout esperando libsodium'));
-      setTimeout(check, 50);
-    })();
-  });
+// Espera a libsodium e indica en qué etapa falló, en vez de un timeout genérico.
+async function waitForSodium(timeoutMs){
+  const t0 = Date.now();
+  while (!(window.sodium && window.sodium.ready)) {
+    if (Date.now()-t0 > timeoutMs) {
+      throw new Error(!window.libsodium
+        ? 'no se ejecutó libsodium-sumo.js (mira arriba si falló la descarga)'
+        : 'el núcleo cargó pero libsodium-wrappers.js no se ejecutó');
+    }
+    await new Promise(r=>setTimeout(r,50));
+  }
+  await Promise.race([
+    window.sodium.ready,   // si rechaza, el mensaje real llega al catch de abajo
+    new Promise((_,rej)=>setTimeout(()=>rej(new Error('sodium.ready no resolvió a tiempo (¿WebAssembly bloqueado por CSP?)')), timeoutMs))
+  ]);
+  if (!window.sodium.crypto_pwhash) throw new Error('cargó, pero sin crypto_pwhash: no es la build SUMO');
+  return window.sodium;
 }
 
 window.addEventListener('load', async ()=>{
