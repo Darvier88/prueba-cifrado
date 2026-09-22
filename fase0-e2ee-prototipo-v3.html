@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Fase 0 · Prototipo E2EE v3 (Web Worker) · Backup Reader</title>
+<title>Fase 0 · Prototipo E2EE v3.1 (Web Worker) · Backup Reader</title>
 <style>
   :root{
     --paper:#FBF8F1; --paper2:#F5F0E6; --ink:#16233B; --slate:#5A6673; --teal:#2F7E6C;
-    --teal2:#245F52; --border:#D3D8DE; --warn:#B8842B; --err:#9A5B3F; --card:#fff;
+    --teal2:#245F52; --border:#D3D8DE; --err:#9A5B3F; --card:#fff;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace; --sans:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
   }
   *{box-sizing:border-box}
@@ -38,9 +38,9 @@
 </head>
 <body>
 <div class="wrap">
-  <span class="tag">v3 · cripto en Web Worker</span>
+  <span class="tag">v3.1 · worker persistente · libsodium incrustado</span>
   <h1>Fase 0 · Prototipo E2EE en navegador</h1>
-  <p class="sub">Todo el trabajo pesado (Argon2id + cifrado/descifrado con XChaCha20-Poly1305 en bloques de 64 KiB) corre en un <b>Web Worker</b>, fuera del hilo principal. Así no se congela la interfaz ni depende de que la pestaña esté visible.</p>
+  <p class="sub">Argon2id + XChaCha20-Poly1305 (secretstream, 64 KiB) corriendo en un <b>Web Worker</b>. libsodium se descarga una vez y se incrusta en el worker (sin importScripts), y el worker queda vivo entre corridas.</p>
 
   <div class="card">
     <div class="row">
@@ -54,7 +54,7 @@
     </div>
     <div class="row" style="margin-top:16px">
       <button id="run" disabled>Cifrar → descifrar → reproducir</button>
-      <span id="status" class="note"></span>
+      <span id="status" class="note">Inicializando…</span>
     </div>
     <div class="progress"><i id="bar"></i></div>
   </div>
@@ -77,28 +77,16 @@
   <div class="card"><label class="lbl">Registro</label><div class="log" id="log"></div></div>
 </div>
 
-<!-- ===================== CÓDIGO DEL WEB WORKER (inline) ===================== -->
-<script id="worker-src" type="javascript/worker">
+<!-- ===================== CÓDIGO DEL WEB WORKER (se concatena DESPUÉS de libsodium) ===================== -->
+<script id="worker-src" type="text/plain">
+/* En este punto libsodium (core + wrapper) ya está incrustado arriba: existe self.sodium con .ready */
 const CHUNK = 64 * 1024;
-let sodium = null;
+let ready = false;
 
-function post(o){ self.postMessage(o); }
-function loadSodium(){
-  return new Promise((resolve, reject)=>{
-    try{
-      importScripts(
-        "https://cdn.jsdelivr.net/npm/libsodium-sumo@0.7.13/dist/modules-sumo/libsodium-sumo.js",
-        "https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.13/dist/modules-sumo/libsodium-wrappers.js"
-      );
-    }catch(e){ return reject(new Error("importScripts falló: "+e.message)); }
-    const t0 = Date.now();
-    (function chk(){
-      if (self.sodium && self.sodium.crypto_pwhash) return resolve(self.sodium);
-      if (Date.now()-t0 > 15000) return reject(new Error("timeout esperando libsodium en el worker"));
-      setTimeout(chk, 40);
-    })();
-  });
-}
+(async function init(){
+  try{ await self.sodium.ready; ready = true; self.postMessage({t:'ready', ver: self.sodium.sodium_version_string ? self.sodium.sodium_version_string() : '?'}); }
+  catch(e){ self.postMessage({t:'error', m:'sodium.ready falló en el worker: '+e.message}); }
+})();
 
 async function* fromSlices(file, st){
   for(let off=0; off<file.size; off+=CHUNK){
@@ -126,44 +114,41 @@ async function* fromStream(file, st){
 }
 
 self.onmessage = async (e)=>{
+  if(!ready){ self.postMessage({t:'error', m:'worker aún no está listo'}); return; }
+  const S = self.sodium;
   const { file, pass, mode } = e.data;
   try{
-    if(!sodium){ post({t:'log', m:'worker: cargando libsodium…'}); sodium = await loadSodium(); post({t:'log', m:'worker: libsodium '+ (sodium.sodium_version_string?sodium.sodium_version_string():'?') +' listo'}); }
-
     // 1) Argon2id
-    const salt = sodium.randombytes_buf(sodium.crypto_pwhash_SALTBYTES);
+    const salt = S.randombytes_buf(S.crypto_pwhash_SALTBYTES);
     let t = performance.now();
-    const key = sodium.crypto_pwhash(
-      sodium.crypto_secretstream_xchacha20poly1305_KEYBYTES, pass, salt,
-      3, 64*1024*1024, sodium.crypto_pwhash_ALG_ARGON2ID13);
-    const kdfMs = performance.now()-t;
-    post({t:'kdf', ms:kdfMs});
+    const key = S.crypto_pwhash(S.crypto_secretstream_xchacha20poly1305_KEYBYTES, pass, salt, 3, 64*1024*1024, S.crypto_pwhash_ALG_ARGON2ID13);
+    self.postMessage({t:'kdf', ms: performance.now()-t});
 
     // 2) Cifrar
     const stE = {read:0, reads:0, crypto:0};
     const encT0 = performance.now();
-    const { state, header } = sodium.crypto_secretstream_xchacha20poly1305_init_push(key);
-    const TAG_MSG = sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE;
-    const TAG_FIN = sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL;
+    const { state, header } = S.crypto_secretstream_xchacha20poly1305_init_push(key);
+    const TAG_MSG = S.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE;
+    const TAG_FIN = S.crypto_secretstream_xchacha20poly1305_TAG_FINAL;
     const cipherChunks = []; let off = 0, n = 0;
     const src = mode==='stream' ? fromStream(file, stE) : fromSlices(file, stE);
     for await (const buf of src){
       const isLast = off + buf.length >= file.size;
       const c0 = performance.now();
-      const c = sodium.crypto_secretstream_xchacha20poly1305_push(state, buf, null, isLast?TAG_FIN:TAG_MSG);
+      const c = S.crypto_secretstream_xchacha20poly1305_push(state, buf, null, isLast?TAG_FIN:TAG_MSG);
       stE.crypto += performance.now()-c0;
       cipherChunks.push(c); off += buf.length;
-      if((++n & 127)===0) post({t:'prog', phase:'enc', pct:(off/file.size)*50});
+      if((++n & 127)===0) self.postMessage({t:'prog', pct:(off/file.size)*50});
     }
     const cipherBlob = new Blob(cipherChunks); cipherChunks.length = 0;
     const encMs = performance.now()-encT0;
-    post({t:'enc', ms:encMs, blocks:n, size:cipherBlob.size, read:stE.read, reads:stE.reads, crypto:stE.crypto});
+    self.postMessage({t:'enc', ms:encMs, blocks:n, size:cipherBlob.size, read:stE.read, reads:stE.reads, crypto:stE.crypto});
 
     // 3) Descifrar
     const stD = {read:0, crypto:0};
-    const CIPHER_CHUNK = CHUNK + sodium.crypto_secretstream_xchacha20poly1305_ABYTES;
+    const CIPHER_CHUNK = CHUNK + S.crypto_secretstream_xchacha20poly1305_ABYTES;
     const decT0 = performance.now();
-    const pull = sodium.crypto_secretstream_xchacha20poly1305_init_pull(header, key);
+    const pull = S.crypto_secretstream_xchacha20poly1305_init_pull(header, key);
     const plainChunks = []; let coff=0, okFinal=false, m=0;
     while(coff < cipherBlob.size){
       const end = Math.min(coff+CIPHER_CHUNK, cipherBlob.size);
@@ -171,22 +156,20 @@ self.onmessage = async (e)=>{
       const cbuf = new Uint8Array(await cipherBlob.slice(coff, end).arrayBuffer());
       stD.read += performance.now()-r0;
       const c0 = performance.now();
-      const res = sodium.crypto_secretstream_xchacha20poly1305_pull(pull, cbuf);
+      const res = S.crypto_secretstream_xchacha20poly1305_pull(pull, cbuf);
       stD.crypto += performance.now()-c0;
       if(!res) throw new Error('fallo al descifrar/verificar un bloque (posible manipulación/truncamiento)');
       plainChunks.push(res.message); if(res.tag===TAG_FIN) okFinal=true;
       coff = end;
-      if((++m & 127)===0) post({t:'prog', phase:'dec', pct:50+(coff/cipherBlob.size)*50});
+      if((++m & 127)===0) self.postMessage({t:'prog', pct:50+(coff/cipherBlob.size)*50});
     }
     const plainBlob = new Blob(plainChunks, { type: file.type || 'application/octet-stream' });
     const decMs = performance.now()-decT0;
-    post({t:'dec', ms:decMs, okFinal, size:plainBlob.size, read:stD.read, crypto:stD.crypto});
+    self.postMessage({t:'dec', ms:decMs, okFinal, size:plainBlob.size, read:stD.read, crypto:stD.crypto});
 
     const integ = okFinal && plainBlob.size === file.size;
-    post({t:'done', integ, plainBlob});   // el Blob se clona por referencia, sin copiar
-  }catch(err){
-    post({t:'error', m: err.message});
-  }
+    self.postMessage({t:'done', integ, plainBlob});
+  }catch(err){ self.postMessage({t:'error', m: err.message}); }
 };
 </script>
 
@@ -197,83 +180,88 @@ function log(...a){ const l=$('log'); l.textContent += a.join(' ') + '\n'; l.scr
 function fmtBytes(n){ if(n<1024)return n+' B'; if(n<1048576)return (n/1024).toFixed(1)+' KB'; if(n<1073741824)return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
 function fmtMs(ms){ return ms<1000 ? ms.toFixed(0)+' ms' : (ms/1000).toFixed(2)+' s'; }
 
-// Construir el worker desde el bloque inline (todo en un archivo).
-const workerBlob = new Blob([document.getElementById('worker-src').textContent], {type:'application/javascript'});
-const workerUrl = URL.createObjectURL(workerBlob);
-let worker = null, wake = null, jankMax = 0, jankTimer = null;
+const CORE_URL = 'https://cdn.jsdelivr.net/npm/libsodium-sumo@0.7.13/dist/modules-sumo/libsodium-sumo.js';
+const WRAP_URL = 'https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.13/dist/modules-sumo/libsodium-wrappers.js';
+
+let worker = null, workerReady = false, wake = null, jankMax = 0, jankTimer = null, busy = false;
 
 $('m-plat').textContent = navigator.userAgent.slice(0,54)+'…';
 $('m-ww').textContent = (typeof Worker!=='undefined') ? 'disponible' : 'NO disponible';
-log('Contexto:', location.protocol, '· Worker:', typeof Worker!=='undefined' ? 'sí':'no',
-    '· RAM aprox:', (navigator.deviceMemory? navigator.deviceMemory+' GB':'n/d'));
+log('Contexto:', location.protocol, '· Worker:', typeof Worker!=='undefined'?'sí':'no', '· RAM aprox:', (navigator.deviceMemory? navigator.deviceMemory+' GB':'n/d'));
 
-if(typeof Worker==='undefined'){ $('status').textContent='Este navegador no soporta Web Workers.'; }
-else { $('run').disabled = false; $('status').textContent='Listo. Elige un archivo.'; }
-
-$('file').addEventListener('change', ()=>{ if(typeof Worker!=='undefined') $('run').disabled = !$('file').files[0]; });
-
-// Mide si el hilo principal se queda "libre": un latido cada 100 ms; si se atrasa mucho, hubo jank.
-function startJankMeter(){
-  jankMax = 0; let last = performance.now();
-  jankTimer = setInterval(()=>{ const now=performance.now(); const drift=now-last-100; if(drift>jankMax)jankMax=drift; last=now; }, 100);
+// Construye el worker UNA vez: descarga libsodium (core+wrapper) y lo incrusta antes del código del worker.
+async function buildWorker(){
+  if(typeof Worker==='undefined'){ $('status').textContent='Este navegador no soporta Web Workers.'; return; }
+  try{
+    $('status').textContent='Descargando libsodium…';
+    log('Descargando libsodium (core + wrapper)…');
+    const [c,w] = await Promise.all([fetch(CORE_URL), fetch(WRAP_URL)]);
+    if(!c.ok||!w.ok) throw new Error('descarga de libsodium falló (HTTP '+c.status+'/'+w.status+')');
+    const core = await c.text(), wrap = await w.text();
+    log('libsodium descargado ('+fmtBytes(core.length+wrap.length)+'). Construyendo worker…');
+    const workerCode = document.getElementById('worker-src').textContent;
+    const blob = new Blob([core, '\n;\n', wrap, '\n;\n', workerCode], {type:'application/javascript'});
+    worker = new Worker(URL.createObjectURL(blob));
+    worker.onmessage = onMsg;
+    worker.onerror = (ev)=>{ log('ERROR worker:', ev.message||'(sin mensaje)'); $('status').textContent='Error del worker.'; };
+    // esperar 'ready'
+    await new Promise((res,rej)=>{
+      readyResolve = res;
+      setTimeout(()=>{ if(!workerReady) rej(new Error('el worker no envió "ready" en 25 s')); }, 25000);
+    });
+  }catch(e){
+    $('status').textContent = 'No se pudo iniciar: '+e.message;
+    log('ERROR init:', e.message, '\n(¿CDN bloqueado por red/adblocker/CSP? Prueba en incógnito.)');
+  }
 }
-function stopJankMeter(){ clearInterval(jankTimer);
-  $('m-jank').innerHTML = jankMax < 150
-    ? '<span class="pill ok">Sí ('+jankMax.toFixed(0)+' ms)</span>'
-    : '<span class="pill err">'+jankMax.toFixed(0)+' ms</span>';
+
+let readyResolve = null;
+function onMsg(e){
+  const d = e.data;
+  if(d.t==='ready'){ workerReady=true; log('Worker listo. libsodium', d.ver); $('status').textContent='Listo. Elige un archivo.'; if($('file').files[0]) $('run').disabled=false; if(readyResolve) readyResolve(); }
+  else if(d.t==='kdf'){ $('m-kdf').textContent=fmtMs(d.ms); log('  Argon2id:', fmtMs(d.ms)); }
+  else if(d.t==='prog'){ $('bar').style.width=d.pct.toFixed(0)+'%'; }
+  else if(d.t==='enc'){ $('m-enc').textContent=fmtMs(d.ms);
+    log('  Cifrado:', fmtMs(d.ms), '· bloques:', d.blocks, '· ciphertext:', fmtBytes(d.size));
+    log('    lectura:', fmtMs(d.read), '('+d.reads+' lecturas) · cripto:', fmtMs(d.crypto), '· otros:', fmtMs(d.ms-d.read-d.crypto)); }
+  else if(d.t==='dec'){ $('m-dec').textContent=fmtMs(d.ms);
+    log('  Descifrado:', fmtMs(d.ms), '· tag FINAL:', d.okFinal, '· salida:', fmtBytes(d.size));
+    log('    lectura:', fmtMs(d.read), '· cripto:', fmtMs(d.crypto), '· otros:', fmtMs(d.ms-d.read-d.crypto)); }
+  else if(d.t==='done'){
+    $('m-ok').innerHTML = d.integ ? '<span class="pill ok">Sí</span>' : '<span class="pill err">No</span>';
+    const url = URL.createObjectURL(d.plainBlob); const type=d.plainBlob.type||'';
+    let el;
+    if(type.startsWith('image/')) el='<img src="'+url+'" alt="descifrada" />';
+    else if(type.startsWith('audio/')) el='<audio controls src="'+url+'" style="width:100%"></audio>';
+    else if(type.startsWith('video/')) el='<video controls src="'+url+'" style="width:100%;max-height:420px"></video>';
+    else el='<a href="'+url+'" download class="note">Descargar archivo descifrado</a>';
+    $('media').innerHTML=el; $('bar').style.width='100%';
+    $('status').textContent = d.integ ? '✓ OK: íntegro.' : '⚠ Terminó pero la verificación falló.';
+    log('=== FIN ==='); endRun();
+  }
+  else if(d.t==='error'){ $('status').textContent='✗ Error: '+d.m; $('m-ok').innerHTML='<span class="pill err">Error</span>'; log('ERROR:', d.m); endRun(); }
 }
+
+function startJank(){ jankMax=0; let last=performance.now(); jankTimer=setInterval(()=>{ const now=performance.now(); const drift=now-last-100; if(drift>jankMax)jankMax=drift; last=now; },100); }
+function stopJank(){ clearInterval(jankTimer); $('m-jank').innerHTML = jankMax<150 ? '<span class="pill ok">Sí ('+jankMax.toFixed(0)+' ms)</span>' : '<span class="pill err">'+jankMax.toFixed(0)+' ms</span>'; }
 
 async function run(){
-  const file = $('file').files[0]; if(!file) return;
-  $('run').disabled=true; $('status').textContent='Procesando en el worker…'; $('bar').style.width='0%';
+  const file = $('file').files[0];
+  if(!file || !workerReady || busy) return;
+  busy=true; $('run').disabled=true; $('status').textContent='Procesando en el worker…'; $('bar').style.width='0%';
   $('media').innerHTML='<span class="note">Trabajando…</span>';
-  $('m-size').textContent = fmtBytes(file.size);
-  $('m-kdf').textContent=$('m-enc').textContent=$('m-dec').textContent='…'; $('m-ok').textContent='…';
-  log('\n=== Archivo:', file.name, '('+fmtBytes(file.size)+', tipo:', file.type||'?', ') ===');
-
-  try{ wake = await navigator.wakeLock.request('screen'); log('Wake lock activo.'); }catch(e){ log('Sin wake lock ('+(e.message||'no soportado')+').'); }
-  startJankMeter();
-
-  worker = new Worker(workerUrl);
-  worker.onmessage = (e)=>{
-    const d = e.data;
-    if(d.t==='log') log(d.m);
-    else if(d.t==='kdf'){ $('m-kdf').textContent=fmtMs(d.ms); log('  Argon2id:', fmtMs(d.ms)); }
-    else if(d.t==='prog'){ $('bar').style.width = d.pct.toFixed(0)+'%'; }
-    else if(d.t==='enc'){ $('m-enc').textContent=fmtMs(d.ms);
-      log('  Cifrado:', fmtMs(d.ms), '· bloques:', d.blocks, '· ciphertext:', fmtBytes(d.size));
-      log('    lectura:', fmtMs(d.read), '('+d.reads+' lecturas) · cripto:', fmtMs(d.crypto), '· otros:', fmtMs(d.ms-d.read-d.crypto)); }
-    else if(d.t==='dec'){ $('m-dec').textContent=fmtMs(d.ms);
-      log('  Descifrado:', fmtMs(d.ms), '· tag FINAL:', d.okFinal, '· salida:', fmtBytes(d.size));
-      log('    lectura:', fmtMs(d.read), '· cripto:', fmtMs(d.crypto), '· otros:', fmtMs(d.ms-d.read-d.crypto)); }
-    else if(d.t==='done'){
-      $('m-ok').innerHTML = d.integ ? '<span class="pill ok">Sí</span>' : '<span class="pill err">No</span>';
-      const url = URL.createObjectURL(d.plainBlob); const type = d.plainBlob.type||'';
-      let el;
-      if(type.startsWith('image/')) el = '<img src="'+url+'" alt="descifrada" />';
-      else if(type.startsWith('audio/')) el = '<audio controls src="'+url+'" style="width:100%"></audio>';
-      else if(type.startsWith('video/')) el = '<video controls src="'+url+'" style="width:100%;max-height:420px"></video>';
-      else el = '<a href="'+url+'" download class="note">Descargar archivo descifrado</a>';
-      $('media').innerHTML = el;
-      $('bar').style.width='100%'; $('status').textContent = d.integ ? '✓ OK: íntegro.' : '⚠ Terminó pero la verificación falló.';
-      log('=== FIN ===');
-      finish();
-    }
-    else if(d.t==='error'){ $('status').textContent='✗ Error: '+d.m; $('m-ok').innerHTML='<span class="pill err">Error</span>'; log('ERROR (worker):', d.m); finish(); }
-  };
-  worker.onerror = (e)=>{ $('status').textContent='✗ Error del worker: '+e.message; log('ERROR worker:', e.message); finish(); };
-
-  // Enviar el archivo al worker (Blob/File se pasa por referencia, sin copiar).
-  worker.postMessage({ file, pass: $('pass').value || 'x', mode: $('mode').value });
+  $('m-size').textContent=fmtBytes(file.size); $('m-kdf').textContent=$('m-enc').textContent=$('m-dec').textContent='…'; $('m-ok').textContent='…';
+  log('\n=== Archivo:', file.name, '('+fmtBytes(file.size)+', tipo:', file.type||'?', ') · lectura:', $('mode').value, '===');
+  try{ wake = await navigator.wakeLock.request('screen'); }catch(_){}
+  startJank();
+  worker.postMessage({ file, pass:$('pass').value||'x', mode:$('mode').value });
 }
+function endRun(){ stopJank(); busy=false; $('run').disabled = !$('file').files[0]; if(wake){ try{wake.release();}catch(_){} wake=null; } }
 
-function finish(){
-  stopJankMeter();
-  if(worker){ worker.terminate(); worker=null; }
-  if(wake){ try{ wake.release(); }catch(_){} wake=null; }
-  $('run').disabled=false;
-}
+$('file').addEventListener('change', ()=>{ if(workerReady) $('run').disabled = !$('file').files[0]; });
 $('run').addEventListener('click', run);
+
+buildWorker();
 </script>
 </body>
 </html>
