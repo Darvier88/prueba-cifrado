@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Fase 1 v2 · Cripto + archivos (Web Worker) · Backup Reader</title>
+<style>
+  :root{
+    --paper:#FBF8F1; --paper2:#F5F0E6; --ink:#16233B; --slate:#5A6673; --teal:#2F7E6C; --teal2:#245F52;
+    --border:#D3D8DE; --err:#9A5B3F; --card:#fff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace; --sans:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);padding:22px clamp(12px,4vw,32px);line-height:1.5}
+  .wrap{max-width:840px;margin:0 auto}
+  h1{font-size:clamp(21px,3.4vw,28px);letter-spacing:-.02em;margin:0 0 4px}
+  h2{font-size:16px;margin:0 0 12px}
+  .sub{color:var(--slate);font-size:14px;margin:0 0 20px}
+  .tag{display:inline-block;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;background:#DCEEE9;color:var(--teal2);padding:3px 9px;border-radius:100px;margin-bottom:10px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(22,35,59,.05)}
+  .step{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--teal2);margin-bottom:8px}
+  label.lbl{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--slate);display:block;margin-bottom:6px}
+  input[type=text],select{width:100%;padding:11px 12px;border:1.5px solid var(--border);border-radius:6px;font:inherit;background:#fff}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-top:6px}
+  .field{flex:1;min-width:190px}
+  button{background:var(--teal);color:#fff;border:none;border-radius:8px;padding:11px 18px;font:inherit;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;color:var(--ink);border:1.5px solid var(--border)}
+  button:hover{filter:brightness(.96)} button:disabled{opacity:.5;cursor:not-allowed}
+  .status{display:flex;align-items:center;gap:10px;font-size:14px}
+  .dot{width:10px;height:10px;border-radius:50%} .dot.lock{background:var(--err)} .dot.unlock{background:var(--teal)}
+  .code{font-family:var(--mono);font-size:16px;letter-spacing:.06em;background:var(--ink);color:#DCEEE9;padding:14px;border-radius:8px;word-break:break-word;text-align:center;margin:10px 0}
+  .warn{background:#F6EBCF;border:1px solid #EBD9A6;color:#7a5a12;border-radius:8px;padding:12px 14px;font-size:13.5px}
+  pre{font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;word-break:break-word;background:var(--paper2);border-radius:8px;padding:12px;margin:0;max-height:210px;overflow:auto}
+  .note{font-size:13px;color:var(--slate)}
+  .ok{color:var(--teal2);font-weight:600} .bad{color:var(--err);font-weight:600}
+  .log{font-family:var(--mono);font-size:12px;white-space:pre-wrap;background:var(--ink);color:#DCEEE9;border-radius:8px;padding:12px;max-height:200px;overflow:auto}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:3px 10px;border-radius:100px}
+  .pill.ok{background:#DCEEE9;color:var(--teal2)} .pill.bad{background:#F0DED4;color:var(--err)}
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:6px}
+  .metric{background:var(--paper2);border-radius:8px;padding:10px 12px}
+  .metric .k{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--slate)}
+  .metric .v{font-size:18px;font-weight:600;margin-top:2px}
+  .media img,.media video{max-width:100%;border-radius:8px;border:1px solid var(--border)}
+  .progress{height:8px;background:var(--paper2);border-radius:100px;overflow:hidden;margin-top:10px}
+  .progress > i{display:block;height:100%;width:0;background:var(--teal);transition:width .1s}
+  hr{border:none;border-top:1px solid var(--border);margin:14px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="tag">Fase 1 v2 · envelope + archivos en worker</span>
+  <h1>Núcleo cripto + cifrado de archivos</h1>
+  <p class="sub">Desbloqueas con contraseña o código de recuperación → obtienes la <b>DEK</b> → con esa misma DEK ciframos texto y también <b>archivos grandes por bloques</b> (secretstream) en un <b>Web Worker</b>. Un desbloqueo, muchos archivos, sin re-derivar clave por cada uno.</p>
+
+  <div class="card">
+    <div class="status"><span class="dot lock" id="dot"></span><span id="state">Cargando…</span></div>
+  </div>
+
+  <!-- Registro -->
+  <div class="card">
+    <div class="step">Paso 1 · Registro</div>
+    <div class="row">
+      <div class="field"><label class="lbl" for="reg-pass">Contraseña</label><input type="text" id="reg-pass" value="mi-contrasena-segura" /></div>
+      <button id="btn-reg">Registrar</button>
+    </div>
+    <div id="reg-out" style="margin-top:14px;display:none">
+      <label class="lbl">Código de recuperación (guárdalo, no se repite)</label>
+      <div class="code" id="rec-code">—</div>
+      <div class="warn">Si pierdes la contraseña y este código, tus datos se pierden para siempre. Nadie puede recuperarlos.</div>
+    </div>
+  </div>
+
+  <!-- Servidor -->
+  <div class="card">
+    <div class="step">Lo que se guarda en el servidor (simulado)</div>
+    <p class="note">Sin contraseña, sin código, sin DEK, sin texto plano. Solo salts, nonces y envoltorios.</p>
+    <pre id="server">(vacío)</pre>
+  </div>
+
+  <!-- Desbloqueo -->
+  <div class="card">
+    <div class="step">Paso 2 · Desbloquear</div>
+    <div class="row">
+      <div class="field"><label class="lbl" for="unlock-pass">Con contraseña</label><input type="text" id="unlock-pass" placeholder="tu contraseña" /></div>
+      <button id="btn-unlock-pass">Desbloquear</button>
+    </div>
+    <hr/>
+    <div class="row">
+      <div class="field"><label class="lbl" for="unlock-rec">Con código de recuperación</label><input type="text" id="unlock-rec" placeholder="XXXX-XXXX-…" /></div>
+      <button id="btn-unlock-rec" class="ghost">Desbloquear</button>
+    </div>
+    <div id="unlock-msg" style="margin-top:10px"></div>
+  </div>
+
+  <!-- Cambio de contraseña -->
+  <div class="card">
+    <div class="step">Paso 3 · Cambiar contraseña (sin re-cifrar datos)</div>
+    <div class="row">
+      <div class="field"><label class="lbl" for="new-pass">Nueva contraseña</label><input type="text" id="new-pass" placeholder="nueva contraseña" /></div>
+      <button id="btn-change" disabled>Cambiar</button>
+    </div>
+  </div>
+
+  <!-- Prueba TEXTO -->
+  <div class="card">
+    <div class="step">Paso 4 · Prueba con texto (DEK, un paso)</div>
+    <div class="row">
+      <div class="field"><label class="lbl" for="msg">Mensaje</label><input type="text" id="msg" value="Hola, chat privado 🔒" /></div>
+      <button id="btn-enc" disabled>Cifrar</button>
+      <button id="btn-dec" class="ghost" disabled>Descifrar</button>
+    </div>
+    <div id="data-msg" style="margin-top:10px"></div>
+  </div>
+
+  <!-- Prueba ARCHIVO -->
+  <div class="card">
+    <div class="step">Paso 5 · Prueba con archivo (DEK + secretstream en worker)</div>
+    <h2>Cifra, descifra y reproduce un video/imagen/audio con tu DEK</h2>
+    <div class="row">
+      <div class="field"><label class="lbl" for="file">Archivo</label><input type="file" id="file" /></div>
+      <button id="btn-file" disabled>Cifrar → descifrar</button>
+    </div>
+    <div class="progress"><i id="bar"></i></div>
+    <div class="metrics">
+      <div class="metric"><div class="k">Tamaño</div><div class="v" id="m-size">—</div></div>
+      <div class="metric"><div class="k">Cifrado</div><div class="v" id="m-enc">—</div></div>
+      <div class="metric"><div class="k">Descifrado</div><div class="v" id="m-dec">—</div></div>
+      <div class="metric"><div class="k">Íntegro</div><div class="v" id="m-ok">—</div></div>
+      <div class="metric"><div class="k">Hilo principal libre</div><div class="v" id="m-jank" style="font-size:13px">—</div></div>
+    </div>
+    <div class="media" id="media" style="margin-top:12px"></div>
+  </div>
+
+  <div class="card"><label class="lbl">Registro</label><div class="log" id="log"></div></div>
+  <div class="row" style="justify-content:flex-end"><button class="ghost" id="btn-reset">Borrar todo</button></div>
+</div>
+
+<!-- Código del worker (se concatena DESPUÉS de libsodium) -->
+<script id="worker-src" type="text/plain">
+const CHUNK = 64*1024; let ready=false;
+(async function(){ try{ await self.sodium.ready; ready=true; self.postMessage({t:'ready'});}catch(e){ self.postMessage({t:'error', m:'sodium.ready: '+e.message}); } })();
+async function* fromStream(file, st){
+  const r = file.stream().getReader(); let buf=new Uint8Array(CHUNK), fill=0;
+  for(;;){ const t0=performance.now(); const {done,value}=await r.read(); st.read+=performance.now()-t0;
+    if(done) break;
+    for(let p=0;p<value.length;){ const n=Math.min(CHUNK-fill, value.length-p); buf.set(value.subarray(p,p+n),fill); fill+=n; p+=n; if(fill===CHUNK){ yield buf; buf=new Uint8Array(CHUNK); fill=0; } } }
+  if(fill>0) yield buf.subarray(0,fill);
+}
+self.onmessage = async (e)=>{
+  if(!ready){ self.postMessage({t:'error', m:'worker no listo'}); return; }
+  const S=self.sodium; const {file, dek} = e.data;
+  try{
+    // Cifrar con la DEK
+    const stE={read:0,crypto:0}; const encT0=performance.now();
+    const {state,header}=S.crypto_secretstream_xchacha20poly1305_init_push(dek);
+    const MSG=S.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE, FIN=S.crypto_secretstream_xchacha20poly1305_TAG_FINAL;
+    const chunks=[]; let off=0,n=0;
+    for await(const b of fromStream(file, stE)){ const last=off+b.length>=file.size; const c0=performance.now();
+      chunks.push(S.crypto_secretstream_xchacha20poly1305_push(state,b,null,last?FIN:MSG)); stE.crypto+=performance.now()-c0; off+=b.length;
+      if((++n&127)===0) self.postMessage({t:'prog', pct:(off/file.size)*50}); }
+    const cipher=new Blob(chunks); chunks.length=0;
+    self.postMessage({t:'enc', ms:performance.now()-encT0, read:stE.read, crypto:stE.crypto, size:cipher.size});
+    // Descifrar con la DEK
+    const decT0=performance.now(); const CC=CHUNK+S.crypto_secretstream_xchacha20poly1305_ABYTES;
+    const pull=S.crypto_secretstream_xchacha20poly1305_init_pull(header, dek);
+    const plain=[]; let coff=0, okFin=false, m=0;
+    while(coff<cipher.size){ const end=Math.min(coff+CC, cipher.size);
+      const cb=new Uint8Array(await cipher.slice(coff,end).arrayBuffer());
+      const res=S.crypto_secretstream_xchacha20poly1305_pull(pull, cb);
+      if(!res) throw new Error('bloque inválido (manipulación/truncamiento)');
+      plain.push(res.message); if(res.tag===FIN) okFin=true; coff=end;
+      if((++m&127)===0) self.postMessage({t:'prog', pct:50+(coff/cipher.size)*50}); }
+    const out=new Blob(plain,{type:file.type||'application/octet-stream'});
+    self.postMessage({t:'dec', ms:performance.now()-decT0, size:out.size, okFin});
+    self.postMessage({t:'done', integ: okFin && out.size===file.size, blob:out});
+  }catch(err){ self.postMessage({t:'error', m:err.message}); }
+};
+</script>
+
+<!-- libsodium para el HILO PRINCIPAL (envelope encryption) -->
+<script src="https://cdn.jsdelivr.net/npm/libsodium-sumo@0.7.13/dist/modules-sumo/libsodium-sumo.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.13/dist/modules-sumo/libsodium-wrappers.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+function log(...a){ const l=$('log'); l.textContent+=a.join(' ')+'\n'; l.scrollTop=l.scrollHeight; }
+function fmtBytes(n){ if(n<1024)return n+' B'; if(n<1048576)return (n/1024).toFixed(1)+' KB'; if(n<1073741824)return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
+function fmtMs(ms){ return ms<1000?ms.toFixed(0)+' ms':(ms/1000).toFixed(2)+' s'; }
+const STORE_KEY='br_vault_demo_v2', KDF={ops:3,mem:64*1024*1024};
+let S=null, dek=null, worker=null, workerReady=false, wake=null, jankMax=0, jankTimer=null, busy=false;
+const CORE='https://cdn.jsdelivr.net/npm/libsodium-sumo@0.7.13/dist/modules-sumo/libsodium-sumo.js';
+const WRAP='https://cdn.jsdelivr.net/npm/libsodium-wrappers-sumo@0.7.13/dist/modules-sumo/libsodium-wrappers.js';
+
+const b64=u=>S.to_base64(u,S.base64_variants.ORIGINAL), unb64=s=>S.from_base64(s,S.base64_variants.ORIGINAL);
+const deriveKEK=(sec,salt)=>S.crypto_pwhash(S.crypto_secretbox_KEYBYTES,S.from_string(sec),salt,KDF.ops,KDF.mem,S.crypto_pwhash_ALG_ARGON2ID13);
+function wrapDEK(d,kek){ const nc=S.randombytes_buf(S.crypto_secretbox_NONCEBYTES); return {n:b64(nc), c:b64(S.crypto_secretbox_easy(d,nc,kek))}; }
+function unwrapDEK(w,kek){ try{ return S.crypto_secretbox_open_easy(unb64(w.c),unb64(w.n),kek); }catch(e){ return null; } }
+function genRec(){ const bytes=S.randombytes_buf(20), A='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; let bits=0,val=0,o=''; for(const b of bytes){ val=(val<<8)|b; bits+=8; while(bits>=5){ o+=A[(val>>>(bits-5))&31]; bits-=5; } } if(bits>0)o+=A[(val<<(5-bits))&31]; return o.match(/.{1,4}/g).join('-'); }
+const normRec=s=>(s||'').toUpperCase().replace(/[^A-Z2-7]/g,'');
+
+function renderStore(){ $('server').textContent = window.__store ? JSON.stringify(window.__store,null,2) : '(vacío)'; }
+function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(window.__store)); renderStore(); }
+function setLocked(lock){
+  if(lock) dek=null;
+  $('dot').className='dot '+(lock?'lock':'unlock');
+  $('state').textContent = !window.__store ? 'Sin cuenta. Regístrate.' : lock ? '🔒 Bloqueado.' : '🔓 Desbloqueado. DEK en memoria.';
+  const dis = lock;
+  $('btn-change').disabled=dis; $('btn-enc').disabled=dis; $('btn-dec').disabled=dis || !(window.__store&&window.__store.data);
+  $('btn-file').disabled = dis || !$('file').files[0] || !workerReady;
+}
+
+// ---- Envelope ----
+function register(){ const p=$('reg-pass').value; if(!p)return;
+  const pwSalt=S.randombytes_buf(S.crypto_pwhash_SALTBYTES), recSalt=S.randombytes_buf(S.crypto_pwhash_SALTBYTES), rec=genRec();
+  const DEK=S.randombytes_buf(S.crypto_secretbox_KEYBYTES);
+  window.__store={ kdf:{alg:'argon2id',mem_mib:64,ops:3}, pwSalt:b64(pwSalt), recSalt:b64(recSalt),
+    wrapPw:wrapDEK(DEK,deriveKEK(p,pwSalt)), wrapRec:wrapDEK(DEK,deriveKEK(normRec(rec),recSalt)), data:null };
+  save(); dek=DEK; setLocked(false);
+  $('rec-code').textContent=rec; $('reg-out').style.display='block';
+  log('Registro OK. DEK generada y envuelta (contraseña + recuperación).');
+}
+function unlock(sec,saltB64,w,via){ if(!window.__store){ $('unlock-msg').innerHTML='<span class="bad">No hay cuenta.</span>'; return; }
+  const d=unwrapDEK(w, deriveKEK(sec, unb64(saltB64)));
+  if(!d){ $('unlock-msg').innerHTML='<span class="bad">✗ '+via+' incorrecta.</span>'; return; }
+  dek=d; setLocked(false); $('unlock-msg').innerHTML='<span class="ok">✓ Desbloqueado con '+via+'.</span>'; log('Desbloqueo OK ('+via+').');
+}
+function changePass(){ if(!dek)return; const np=$('new-pass').value; if(!np)return;
+  const pwSalt=S.randombytes_buf(S.crypto_pwhash_SALTBYTES);
+  window.__store.pwSalt=b64(pwSalt); window.__store.wrapPw=wrapDEK(dek, deriveKEK(np,pwSalt)); save();
+  $('unlock-msg').innerHTML='<span class="ok">✓ Contraseña cambiada (solo se re-envolvió la DEK).</span>'; log('Cambio de contraseña: DEK y datos intactos.');
+}
+function encText(){ if(!dek)return; const nc=S.randombytes_buf(S.crypto_secretbox_NONCEBYTES);
+  window.__store.data={n:b64(nc), c:b64(S.crypto_secretbox_easy(S.from_string($('msg').value),nc,dek))}; save(); setLocked(false);
+  $('data-msg').innerHTML='<span class="ok">✓ Texto cifrado con la DEK.</span>'; }
+function decText(){ if(!dek||!window.__store.data)return; try{ const pt=S.to_string(S.crypto_secretbox_open_easy(unb64(window.__store.data.c),unb64(window.__store.data.n),dek));
+  $('data-msg').innerHTML='<span class="ok">✓ Descifrado:</span> "'+pt.replace(/</g,'&lt;')+'"'; }catch(e){ $('data-msg').innerHTML='<span class="bad">✗ DEK equivocada.</span>'; } }
+
+// ---- Worker de archivos ----
+async function buildWorker(){
+  try{
+    const [c,w]=await Promise.all([fetch(CORE),fetch(WRAP)]); if(!c.ok||!w.ok) throw new Error('descarga libsodium falló');
+    const blob=new Blob([await c.text(),'\n;\n',await w.text(),'\n;\n',$('worker-src').textContent],{type:'application/javascript'});
+    worker=new Worker(URL.createObjectURL(blob));
+    worker.onmessage=onWork; worker.onerror=ev=>log('ERROR worker:', ev.message||'?');
+    await new Promise((res,rej)=>{ readyRes=res; setTimeout(()=>{ if(!workerReady) rej(new Error('worker sin ready')); },25000); });
+  }catch(e){ log('Worker de archivos no disponible:', e.message); }
+}
+let readyRes=null;
+function startJank(){ jankMax=0; let last=performance.now(); jankTimer=setInterval(()=>{ const now=performance.now(); const d=now-last-100; if(d>jankMax)jankMax=d; last=now; },100); }
+function stopJank(){ clearInterval(jankTimer); $('m-jank').innerHTML=jankMax<150?'<span class="pill ok">Sí ('+jankMax.toFixed(0)+' ms)</span>':'<span class="pill bad">'+jankMax.toFixed(0)+' ms</span>'; }
+function onWork(e){ const d=e.data;
+  if(d.t==='ready'){ workerReady=true; log('Worker de archivos listo.'); setLocked(!dek); if(readyRes)readyRes(); }
+  else if(d.t==='prog'){ $('bar').style.width=d.pct.toFixed(0)+'%'; }
+  else if(d.t==='enc'){ $('m-enc').textContent=fmtMs(d.ms); log('  Cifrado archivo:', fmtMs(d.ms), '(lectura', fmtMs(d.read)+', cripto', fmtMs(d.crypto)+')', '· ciphertext', fmtBytes(d.size)); }
+  else if(d.t==='dec'){ $('m-dec').textContent=fmtMs(d.ms); log('  Descifrado archivo:', fmtMs(d.ms), '· tag FINAL', d.okFin); }
+  else if(d.t==='done'){ $('m-ok').innerHTML=d.integ?'<span class="pill ok">Sí</span>':'<span class="pill bad">No</span>';
+    const big=d.blob.size>40*1024*1024, type=d.blob.type||'';
+    const render=()=>{ const u=URL.createObjectURL(d.blob); let el;
+      if(type.startsWith('image/'))el='<img src="'+u+'"/>'; else if(type.startsWith('audio/'))el='<audio controls src="'+u+'" style="width:100%"></audio>';
+      else if(type.startsWith('video/'))el='<video controls preload="metadata" src="'+u+'" style="width:100%;max-height:400px"></video>'; else el='<a href="'+u+'" download class="note">Descargar</a>';
+      $('media').innerHTML=el; };
+    if(big){ const du=URL.createObjectURL(d.blob);
+      $('media').innerHTML='<p class="note">Descifrado OK e íntegro ('+fmtBytes(d.blob.size)+'). Reproducir algo tan grande puede congelar la pantalla en móvil.</p>'+
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px"><button id="pl">Reproducir de todas formas</button><a href="'+du+'" download class="note" style="align-self:center">Descargar</a></div>';
+      const b=$('pl'); if(b)b.onclick=()=>{ $('media').innerHTML='<span class="note">Cargando…</span>'; setTimeout(render,30); };
+    } else render();
+    $('bar').style.width='100%'; log('=== archivo FIN ==='); endFile();
+  }
+  else if(d.t==='error'){ $('m-ok').innerHTML='<span class="pill bad">Error</span>'; log('ERROR archivo:', d.m); endFile(); }
+}
+async function runFile(){ const file=$('file').files[0]; if(!file||!dek||!workerReady||busy)return;
+  busy=true; $('btn-file').disabled=true; $('bar').style.width='0%'; $('media').innerHTML=''; $('m-size').textContent=fmtBytes(file.size); $('m-enc').textContent=$('m-dec').textContent='…'; $('m-ok').textContent='…';
+  log('\n=== Archivo:', file.name, '('+fmtBytes(file.size)+') · cifrando con la DEK ===');
+  try{ wake=await navigator.wakeLock.request('screen'); }catch(_){}
+  startJank();
+  worker.postMessage({ file, dek });   // usa la DEK ya desbloqueada, sin re-derivar
+}
+function endFile(){ stopJank(); busy=false; if(wake){ try{wake.release();}catch(_){}wake=null; } setLocked(!dek); }
+
+function resetAll(){ localStorage.removeItem(STORE_KEY); window.__store=null; dek=null; $('reg-out').style.display='none'; $('unlock-msg').textContent=''; $('data-msg').textContent=''; $('media').innerHTML=''; renderStore(); setLocked(true); log('— Todo borrado —'); }
+
+async function boot(){
+  const t0=Date.now(); while(!(window.sodium&&window.sodium.crypto_pwhash)){ if(Date.now()-t0>15000){ log('ERROR: libsodium no cargó.'); return; } await new Promise(r=>setTimeout(r,50)); }
+  S=window.sodium; log('libsodium (principal) listo:', S.sodium_version_string());
+  const raw=localStorage.getItem(STORE_KEY); if(raw){ window.__store=JSON.parse(raw); log('Cuenta cargada del "servidor".'); }
+  renderStore(); setLocked(true);
+  $('btn-reg').onclick=register;
+  $('btn-unlock-pass').onclick=()=>unlock($('unlock-pass').value, window.__store&&window.__store.pwSalt, window.__store&&window.__store.wrapPw, 'contraseña');
+  $('btn-unlock-rec').onclick=()=>unlock(normRec($('unlock-rec').value), window.__store&&window.__store.recSalt, window.__store&&window.__store.wrapRec, 'código de recuperación');
+  $('btn-change').onclick=changePass; $('btn-enc').onclick=encText; $('btn-dec').onclick=decText;
+  $('file').addEventListener('change', ()=>setLocked(!dek));
+  $('btn-file').onclick=runFile; $('btn-reset').onclick=resetAll;
+  log('Preparando worker de archivos…'); await buildWorker();
+}
+boot();
+</script>
+</body>
+</html>
